@@ -1,0 +1,202 @@
+
+tic;
+
+clear
+
+eps=0.5;
+
+crit = 1e-6;    % Numerical precision for outside loop
+tol  = 1e-8;    % Numerical precision for inside loop
+
+% Aiyagari model [ solved with the endogenous grid point method]
+
+alph=1/3; % elasiticy of capital
+bet=0.96; % patience
+gam=2; % crra
+delt=0.08; %depreciatin rate
+
+Ps=[0.7497 0.2161 0.0322 0.002 0;
+    0.2161 0.4708 0.2569 0.0542 0.002;
+    0.0322 0.2569 0.4218 0.2569 0.0322;
+    0.002 0.0542 0.2569 0.4708 0.2161 ;
+    0 0.002 0.0322 0.2161 0.7497];
+
+sgrid=[0.6177 0.8327 1.0000 1.2009 1.6188]';
+
+ns=5; % number of incomes
+nk=250; % number of asset points
+
+bl=0; % borrowing limit
+
+kgrid=linspace(bl,30,nk)';
+
+kgridl=kron(kgrid,ones(ns,1));
+
+sgridl=repmat(sgrid,nk,1);
+
+%stationary income distribution  Labour supply
+pis0=[0 0 1 0 0]';
+
+pis=pis0'*Ps^1000;
+
+pis=pis';
+
+N=sum(pis.*sgrid); % aggregate labour services
+
+% initialise interest rate
+
+r=1/bet-1;
+
+rmax=0.2;
+rmin=0;
+
+iter=0;
+
+gap=10;
+
+%% find interst rate that clear savings market
+
+while gap>crit
+
+    iter=iter+1;
+
+K0=((((r+delt)/alph))/N^(1-alph))^(1/(alph-1));
+
+w=(1-alph)*K0^(alph)*N^(-alph);
+
+
+%        k1' .................... kn' 
+% k1 s1
+% k1 s2
+%
+%
+% kn sn
+
+% EGM
+tic;
+
+g=w*sgrid'+kgrid*(1+r); % policy function for consumption (nk x ns)
+
+g0=g*2;
+
+while norm(g0-g,'inf')>tol
+
+    g0=g;
+    
+for s=1:ns % looping over present day income state 
+ 
+    rhseuler=sum(bet*(1+r)*repmat(Ps(s,:),nk,1).*(g.^(-gam)),2); % for person who had income state s and chose kt+1
+
+    gtilda=rhseuler.^(-1/gam); %implied consumption for present day ct
+    
+    ktilda=(kgrid+gtilda-w*sgrid(s))/(1+r); % implied starting capital level kt
+    
+    bind=kgrid<=ktilda(1); % captial levels less than when agents chooses to go to borrowing limit
+    
+    x=sortrows([ktilda,gtilda]); % lining up todays capital and consumption choice
+    
+    F=griddedInterpolant(x(:,1),x(:,2)); % creating new consumption function
+     
+    g(:,s)=bind.*((1+r)*kgrid+sgrid(s)*w-kgrid(1))+F(kgrid).*(1-bind); % creating new policy function for person with k and s
+
+end
+
+end
+
+% creating discrete policy function 
+
+gk=(1+r)*kgrid+w*sgrid' - g; % capital choice next period
+
+for s=1:ns % looping over present day income state 
+
+
+gkl(:,s)=max(1,min(sum(gk(:,s) > kgrid',2),nk)); % point on grid lower than choice
+gkh(:,s)=min(gkl(:,s)+1,nk); % point on grid higher than choice
+
+end
+
+wgkh=max(0,min(1,(gk-kgrid(gkl))./ (kgrid(gkh)-kgrid(gkl)))); % weight to high point
+ 
+wgkl=1-wgkh; % weight to low point
+
+
+% reshaping into long format [k s] ((nk x ns) x 1)
+
+Lwgkh=reshape(wgkh',nk*ns,1);
+
+Lwgkl=reshape(wgkl',nk*ns,1);
+
+Lgkh=reshape(gkh',nk*ns,1);
+
+Lgkl=reshape(gkl',nk*ns,1);
+
+
+% creating combined policy and income transition matrix (nk x ns) x (nk x ns)
+
+PI=zeros(nk*ns,nk*ns);
+
+PI(sub2ind(size(PI),repmat([1:nk*ns]',1,5),(Lgkl-1)*ns+[1:5]))=repmat(Ps,nk,1).*Lwgkl; % combined policy and income transition matrix lower choice
+
+PI(sub2ind(size(PI),repmat([1:nk*ns]',1,5),(Lgkh-1)*ns+[1:5]))=repmat(Ps,nk,1).*Lwgkh; % combined policy and income transition matrix higher choice
+
+[lam,eigen]=eigs(PI',1);  % Ergodic Distribution as left unit eigenvector
+    lam=lam./sum(lam);
+
+K1=sum(lam.*(Lwgkl.*kgrid(Lgkl)+Lwgkh.*kgrid(Lgkh))); % capital choice tomorrow at ergodic dist (wighted by low and high point)
+
+
+if K1>K0 % adjusting r based on excess supply of capital
+    rmax=r;
+else
+    rmin=r;
+end
+
+r=(rmax+rmin)/2;
+
+if iter>800
+    iter
+    disp('warning value fn failed to converge')
+    break
+end
+
+gap=abs(rmax-rmin);
+
+capgraph(iter,:)= [K1 K0 rmax rmin r];
+
+end
+
+
+lam2=reshape(lam,ns,nk)';
+
+Kstar=K1;
+
+rstar=alph*(Kstar/N)^(alph-1) -delt;
+
+
+
+c0= (1+rstar)*kgridl +sgridl*w - Lwgkh.*kgrid(Lgkh) - Lwgkl.*kgrid(Lgkl); 
+
+Uc0= c0.^(1-gam)/(1-gam);
+
+Uc0(c0<0)=10e-9;
+
+VL=inv(eye(size(PI))-bet*PI)*Uc0; % value function from solved policy fn
+
+V=reshape(VL,ns,nk)'; % value function in 2D
+
+%% outputs
+
+disp(strcat('Equilibrium interest rate: ',string(r)))
+
+figure(1);
+
+plot(reshape(c0,ns,nk)')
+title('Consumption function')
+xlabel('Wealth')
+
+figure(2);
+bar(kgrid,sum(lam2,2))
+xlabel('Wealth')
+title('Wealth distribution')
+
+
